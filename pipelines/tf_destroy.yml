@@ -1,0 +1,93 @@
+trigger:
+- main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  KEY_VAULT_NAME: 'kv-techboost-ado-01'
+  RESOURCE_GROUP: 'rg-techboost-mgmt'
+  STORAGE_ACCOUNT: 'sttechboostado01'
+  CONTAINER_NAME: 'terraform-state'
+  STATE_KEY: 'terraform.tfstate'
+
+steps:
+- task: UsePythonVersion@0
+  inputs:
+    versionSpec: '3.x'
+    addToPath: true
+
+- script: |
+    python -m pip install --upgrade pip
+    pip install azure-cli python-dotenv setuptools
+  displayName: 'Install Azure CLI, python-dotenv, and setuptools'
+
+- task: AzureKeyVault@2
+  inputs:
+    azureSubscription: 'sp-techboost-ado-01'
+    KeyVaultName: '$(KEY_VAULT_NAME)'
+    SecretsFilter: '*'
+    RunAsPreJob: true
+  displayName: 'Get secrets from Azure Key Vault'
+
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: 'sp-techboost-ado-01'
+    scriptType: 'bash'
+    scriptLocation: 'inlineScript'
+    inlineScript: |
+      az login --service-principal -u $(servicePrincipalId) -p $(servicePrincipalKey) --tenant $(tenantId)
+      az account set --subscription e9437d0b-6b32-471e-91c6-93a92e822f90
+  displayName: 'Azure CLI login using Service Principal'
+
+- task: TerraformInstaller@0
+  inputs:
+    terraformVersion: '1.0.11'
+
+- task: TerraformTaskV4@4
+  inputs:
+    provider: 'azurerm'
+    command: 'init'
+    workingDirectory: '$(System.DefaultWorkingDirectory)/terraform'
+    backendServiceArm: 'sp-techboost-ado-01'
+    backendAzureRmResourceGroupName: 'rg-techboost-mgmt'
+    backendAzureRmStorageAccountName: 'sttechboostado01'
+    backendAzureRmContainerName: 'terraform-state'
+    backendAzureRmKey: 'terraform.tfstate'
+  displayName: 'Terraform Init'
+
+- script: |
+    export ARM_CLIENT_ID=$(servicePrincipalId)
+    export ARM_CLIENT_SECRET=$(servicePrincipalKey)
+    export ARM_SUBSCRIPTION_ID=$(subscriptionId)
+    export ARM_TENANT_ID=$(tenantId)
+    cd terraform
+    terraform destroy -auto-approve | tee terraform_destroy.log
+  displayName: 'Terraform Destroy'
+
+- script: |
+    ls -la $(Build.SourcesDirectory)
+    ls -la $(Build.SourcesDirectory)/terraform
+  displayName: 'List files'
+
+- script: |
+    echo "OPENAI_API_KEY=$(OPENAI-API-KEY)" > $(Build.SourcesDirectory)/.env
+    cat $(Build.SourcesDirectory)/terraform/terraform_destroy.log > $(Build.SourcesDirectory)/deployment_log.txt
+    ls -la $(Build.SourcesDirectory)
+    ls -la $(Build.SourcesDirectory)/terraform
+    python $(Build.SourcesDirectory)/scripts/generate_docs.py
+  displayName: 'Generate Documentation'
+
+- script: |
+    ls -la $(Build.SourcesDirectory)
+    ls -la $(Build.SourcesDirectory)/terraform
+    cp $(Build.SourcesDirectory)/deployment_documentation.md $(Build.ArtifactStagingDirectory)/deployment_documentation.md
+    cp $(Build.SourcesDirectory)/deployment_log.txt $(Build.ArtifactStagingDirectory)/deployment_log.txt
+  displayName: 'List files and copy documentation'
+
+- task: PublishBuildArtifacts@1
+  inputs:
+    PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+    ArtifactName: 'deployment_documentation'
+    publishLocation: 'Container'
+  displayName: 'Publish Documentation Artifact'
